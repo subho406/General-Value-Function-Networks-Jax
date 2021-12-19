@@ -3,12 +3,15 @@ import haiku as hk
 import numpy as np
 import jax.numpy as jnp
 
+from functools import partial
+from jax import jit
 from haiku._src.recurrent import add_batch
 from typing import Optional, Tuple, Any, NamedTuple
 
 class BasePRNN(hk.RNNCore):
     @staticmethod
-    def sensitivity(rnn_forward_pure,rnn_params,rnn_state):
+    @partial(jit, static_argnums=(0,))
+    def sensitivity(rnn_forward,rnn_params,rnn_state):
         """Returns the jacobian of the current hidden state with respect to the RNN params 
             until the length of the trajectory. 
 
@@ -26,7 +29,7 @@ class BasePRNN(hk.RNNCore):
         observations=trajectory.observations
         last_actions=trajectory.last_actions
         def rnn_forward_out(params,obs, act,last_hidden_state):
-            out,_=rnn_forward_pure(params,obs,act,(last_hidden_state,None))
+            out,_=rnn_forward(params,obs,act,(last_hidden_state,None))
             return out #We do not need the state output hence we do this trick 
 
 
@@ -44,7 +47,6 @@ class BasePRNN(hk.RNNCore):
             # del_h_t_theta+=del_f_theta
             del_h_t_theta=jax.tree_multimap(lambda x, y: x+y, del_h_t_theta, del_f_theta)
             return del_h_t_theta,None
-
         del_h_t_theta,_=jax.lax.scan(sensitivity_calc,del_h_tminus1_theta,(observations[1:],last_actions[1:],
                                                                                 last_hidden_states[1:]))
         return del_h_t_theta
