@@ -1,6 +1,7 @@
 """
     Implements the Compass World env
 """
+from os import stat
 import numpy as np
 
 class CompassWorld:
@@ -28,7 +29,8 @@ class CompassWorld:
     def __init__(self,height=8,width=8,seed=0) -> None:
         self.height=height
         self.width=width
-        self.env=np.ones((height,width),dtype=np.int)*self.color_codes['w']
+        self.env=np.chararray((height,width))
+        self.env[:]='w'
         self.env[0,:]='o'
         self.env[:,self.width-1]='y'
         self.env[self.height-1,:]='r'
@@ -77,31 +79,47 @@ class CompassWorld:
             Return the observed color as 
         """
         if self.agent_orientation==0:
-            return self.env[self.agent_pos[0]-1,self.agent_pos[1]]
+            return str(self.env[self.agent_pos[0]-1,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==1:
-            return self.env[self.agent_pos[0],self.agent_pos[1]+1]
+            return str(self.env[self.agent_pos[0],self.agent_pos[1]+1],'utf-8')
         elif self.agent_orientation==2:
-            return self.env[self.agent_pos[0]+1,self.agent_pos[1]]
+            return str(self.env[self.agent_pos[0]+1,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==3:
-            return self.env[self.agent_pos[0],self.agent_pos[1]-1]
+            return str(self.env[self.agent_pos[0],self.agent_pos[1]-1],'utf-8')
     
     def wall_ahead(self):
         """Return the color of the wall in front of the agent
         """
+
         if self.agent_orientation==0:
-            return self.env[0,self.agent_pos[1]]
+            color=str(self.env[0,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==1:
-            return self.env[self.agent_pos[0],self.width-1]
+            color=str(self.env[self.agent_pos[0],self.width-1],'utf-8')
         elif self.agent_orientation==2:
-            return self.env[self.height-1,self.agent_pos[1]]
+            color=str(self.env[self.height-1,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==3:
-            return self.env[self.agent_pos[0],0]
-    
+            color=str(self.env[self.agent_pos[0],0],'utf-8')
+        color_idx=CompassWorld.color_codes[color]
+        wall_vec=np.zeros(len(CompassWorld.color_codes)-1)
+        wall_vec[color_idx-1]=1
+        return wall_vec
+
+
     @staticmethod
     def vectorize_color(color):
+        """Returns a numpy array where a color is encoded with two bits per color: one to indicate the agent observes that color,
+                and the other to indicate another color is observed
+
+        Args:
+            color (str): Color 
+
+        Returns:
+            np.array : [description]
+        """
         color_idx=CompassWorld.color_codes[color]
-        color_vec=np.zeros(len(CompassWorld.color_codes))
-        color_vec[color_idx]=1
+        color_vec=np.array([1,0]*len(CompassWorld.color_codes))
+        color_vec[color_idx*2]=0
+        color_vec[color_idx*2+1]=1
         return color_vec
 
     @staticmethod
@@ -110,3 +128,13 @@ class CompassWorld:
         action_vec=np.zeros(len(CompassWorld.action_codes))
         action_vec[action_idx]=1
         return action_vec
+    
+    @staticmethod
+    def action_vec_size():
+        return len(CompassWorld.action_codes)
+    
+    @staticmethod
+    def color_vec_size():
+        return len(CompassWorld.color_codes)*2
+    
+

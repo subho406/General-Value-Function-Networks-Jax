@@ -85,9 +85,11 @@ class MultiplicativeRNN(BasePRNN):
         w_h_init = hk.initializers.TruncatedNormal(stddev=stddev)
         w_o=hk.get_parameter("w_o",[self.hidden_size,self.input_size,self.action_size],init=w_o_init)
         w_h=hk.get_parameter("w_h",[self.hidden_size,self.hidden_size,self.action_size],init=w_h_init)
+        b=hk.get_parameter("b",[self.hidden_size,self.action_size],init=w_h_init) #The bias conditioned on action
         out_h=jnp.tensordot(jnp.tensordot(w_h,prev_hidden_state,axes=(1,0)),act,axes=1)
         out_o=jnp.tensordot(jnp.tensordot(w_o,obs,axes=(1,0)),act,axes=1)
-        out=jax.nn.sigmoid(out_h+out_o)
+        bias=jnp.tensordot(b,act,axes=1)
+        out=jax.nn.sigmoid(out_h+out_o+bias)
         #Update the trajectories array
         if trajectory is not None:
             last_hidden_states=jnp.concatenate((trajectory.last_hidden_states[1:],
