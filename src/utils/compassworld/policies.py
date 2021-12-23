@@ -12,17 +12,16 @@ class CompassWorldRandomPolicy:
         self.last_state=None
         self.leap=False
 
-
     def step(self,obs):
         if self.leap:
             if obs!='w': #We just hit a wall
                 self.leap=False
-                return self.rng.choice(self.actions)
+                return self.rng.choice(self.actions), 1.0/len(self.actions)
             else:
-                return 'f'
+                return 'f', 1.0
         else:
             if obs!='w' and self.rng.random()<0.1:
                 self.leap=True
-                return 'f'
+                return 'f', 1.0
             else:
-                return self.rng.choice(self.actions)
+                return self.rng.choice(self.actions), 1.0/len(self.actions)

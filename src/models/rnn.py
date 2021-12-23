@@ -64,8 +64,8 @@ class TrajectoryState(NamedTuple):
 
 
 class MultiplicativeRNN(BasePRNN):
-    def __init__(self, obs_size,action_size,hidden_size,name: Optional[str] = None):
-        """Implements a Multiplicative RNN on the observation and action inputs as described in: 
+    def __init__(self, obs_size,action_size,hidden_size,activation='sigmoid',name: Optional[str] = None):
+        """Implements a Multiplicative RNN on the observation and action inputs as described in: (paper in review) 
 
         Args:
             obs_size ([type]): [description]
@@ -77,6 +77,7 @@ class MultiplicativeRNN(BasePRNN):
         self.input_size=obs_size
         self.action_size=action_size
         self.hidden_size=hidden_size
+        self.activation=activation
     
     def __call__(self, obs, act,  prev_state) -> Tuple[Any, Any]:
         prev_hidden_state,trajectory=prev_state
@@ -85,13 +86,17 @@ class MultiplicativeRNN(BasePRNN):
         w_o_init = hk.initializers.TruncatedNormal(stddev=stddev)
         stddev = 1. / np.sqrt(self.hidden_size)
         w_h_init = hk.initializers.TruncatedNormal(stddev=stddev)
+        
         w_o=hk.get_parameter("w_o",[self.hidden_size,self.input_size,self.action_size],init=w_o_init)
         w_h=hk.get_parameter("w_h",[self.hidden_size,self.hidden_size,self.action_size],init=w_h_init)
         b=hk.get_parameter("b",[self.hidden_size,self.action_size],init=w_h_init) #The bias conditioned on action
         out_h=jnp.tensordot(jnp.tensordot(w_h,prev_hidden_state,axes=(1,0)),act,axes=1)
         out_o=jnp.tensordot(jnp.tensordot(w_o,obs,axes=(1,0)),act,axes=1)
         bias=jnp.tensordot(b,act,axes=1)
-        out=jax.nn.sigmoid(out_h+out_o+bias)
+        if self.activation=='sigmoid':
+            out=jax.nn.sigmoid(out_h+out_o+bias)
+        elif self.activation=='tanh':
+            out=jax.nn.tanh(out_h+out_o+bias)
         #Update the trajectories array
         if trajectory is not None:
             last_hidden_states=jnp.concatenate((trajectory.last_hidden_states[1:],
