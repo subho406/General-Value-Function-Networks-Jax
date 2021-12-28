@@ -15,7 +15,7 @@ from src.utils.compassworld.policies import CompassWorldRandomPolicy
 
 
 def run_compass_world(args):
-    env=CompassWorld(seed=args.seed)
+    env=CompassWorld(args.env_size,args.env_size,seed=args.seed)
     policy=CompassWorldRandomPolicy(seed=args.seed)
     o_tplus1=env.observe()
     o_t=None
@@ -32,7 +32,7 @@ def run_compass_world(args):
         predictor=GVFNTDPredictor(obs_size,act_size,args.truncation,
                                     rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,
                                                 lr=args.lr,optimizer=args.optimizer,seed=args.seed)
-    losses,accs=[],[]
+    losses,rmsves,accs=[],[],[]
     mean_accs,mean_rmsves,steps=[],[],[]
 
     for i in tqdm.tqdm(range(args.steps)):
@@ -40,31 +40,32 @@ def run_compass_world(args):
         o_tminus1=o_t
         a_tminus1=a_t
         o_t=o_tplus1
-        target_t_vec=env.wall_ahead()
-        a_t,pi_otat=policy.step(o_t)
+        target_t=env.wall_ahead()
+        a_t,mu_otat=policy.step(o_t)
         o_tplus1=env.step(a_t)
         #Vectorize action, observation
         
         if i>0:
             #Take a step with the predictor
-            if args.agent_type=='prnn':
-                loss,pred=predictor.step(o_t,a_tminus1,target_t_vec)
-            elif args.agent_type=='gvfn':
-                loss,pred=predictor.step(o_t,a_tminus1,o_tplus1,a_t, pi_otat, target_t_vec)
-            
+            loss,pred=predictor.step(o_t,a_tminus1,o_tplus1,a_t, mu_otat)
             losses.append(loss)
-            acc=float(pred.argmax()==target_t_vec.argmax())
+            error=pred-predictor.vectorize_target(target_t)
+            rmsve=((error**2).mean())**0.5
+            rmsves.append(rmsve)
+            acc=float(pred.argmax()==predictor.colors_to_idx[target_t])
             accs.append(acc)
             if (i+1)%args.eval_steps==0:
-                mean_rmsve=np.mean(losses)**0.5
+                mean_loss=np.mean(losses)
+                mean_rmsve=np.mean(rmsves)
                 mean_acc=np.mean(accs)
                 mean_accs.append(mean_acc)
                 mean_rmsves.append(mean_rmsve)
                 steps.append(i+1)
-                tqdm.tqdm.write('Step: %d, Accuracy: %f, RMSVE: %f'%(i+1,mean_acc,mean_rmsve))
-                if args.wandb: wandb.log({'accuracy':mean_acc,'rmsve':mean_rmsve},step=i+1)
-                losses=[]
+                tqdm.tqdm.write('Step: %d, Accuracy: %f, RMSVE: %f, Loss: %f'%(i+1,mean_acc,mean_rmsve,mean_loss))
+                if args.wandb: wandb.log({'accuracy':mean_acc,'rmsve':mean_rmsve,'loss':mean_loss},step=i+1)
+                rmsves=[]
                 accs=[]
+                losses=[]
     print("Training Completed...")
     if args.output_dir is not None:
         df=pd.DataFrame({'steps':steps,'rmsve':mean_rmsves,'acc':mean_accs})
@@ -75,8 +76,9 @@ def run_compass_world(args):
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--truncation',type=int,default=1)
-    parser.add_argument('--lr',type=float,default=0.001)
+    parser.add_argument('--lr',type=float,default=0.01)
     parser.add_argument('--rnn_hidden_size',type=int,default=40)
+    parser.add_argument('--env_size',type=int,default=6)
     parser.add_argument('--hidden_size',type=int,default=32)
     parser.add_argument('--steps',type=int,default=1000000)
     parser.add_argument('--eval_steps',type=int,default=100)

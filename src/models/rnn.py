@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Any, NamedTuple
 
 class BasePRNN(hk.RNNCore):
     @staticmethod
-    @partial(jit, static_argnums=(0,))
+    @partial(jit, static_argnums=(0,)) 
     def sensitivity(rnn_forward,rnn_params,rnn_state):
         """Returns the jacobian of the current hidden state with respect to the RNN params 
             until the length of the trajectory. 
@@ -28,6 +28,7 @@ class BasePRNN(hk.RNNCore):
         last_hidden_states=trajectory.last_hidden_states
         observations=trajectory.observations
         last_actions=trajectory.last_actions
+        
         def rnn_forward_out(params,obs, act,last_hidden_state):
             out,_=rnn_forward(params,obs,act,(last_hidden_state,None))
             return out #We do not need the state output hence we do this trick 
@@ -47,8 +48,9 @@ class BasePRNN(hk.RNNCore):
             # del_h_t_theta+=del_f_theta
             del_h_t_theta=jax.tree_multimap(lambda x, y: x+y, del_h_t_theta, del_f_theta)
             return del_h_t_theta,None
+        
         del_h_t_theta,_=jax.lax.scan(sensitivity_calc,del_h_tminus1_theta,(observations[1:],last_actions[1:],
-                                                                                last_hidden_states[1:]))
+                                                                               last_hidden_states[1:]))
         return del_h_t_theta
 
 
@@ -82,14 +84,12 @@ class MultiplicativeRNN(BasePRNN):
     def __call__(self, obs, act,  prev_state) -> Tuple[Any, Any]:
         prev_hidden_state,trajectory=prev_state
         #Take one step in RNN 
-        stddev = 1. / np.sqrt(self.input_size)
-        w_o_init = hk.initializers.TruncatedNormal(stddev=stddev)
-        stddev = 1. / np.sqrt(self.hidden_size)
-        w_h_init = hk.initializers.TruncatedNormal(stddev=stddev)
-        
-        w_o=hk.get_parameter("w_o",[self.hidden_size,self.input_size,self.action_size],init=w_o_init)
-        w_h=hk.get_parameter("w_h",[self.hidden_size,self.hidden_size,self.action_size],init=w_h_init)
-        b=hk.get_parameter("b",[self.hidden_size,self.action_size],init=w_h_init) #The bias conditioned on action
+        #glorot_uniform initializer
+        init = hk.initializers.VarianceScaling(1.0, 'fan_avg', 'uniform')
+
+        w_o=hk.get_parameter("w_o",[self.hidden_size,self.input_size,self.action_size],init=init)
+        w_h=hk.get_parameter("w_h",[self.hidden_size,self.hidden_size,self.action_size],init=init)
+        b=hk.get_parameter("b",[self.hidden_size,self.action_size],init=init) #The bias conditioned on action
         out_h=jnp.tensordot(jnp.tensordot(w_h,prev_hidden_state,axes=(1,0)),act,axes=1)
         out_o=jnp.tensordot(jnp.tensordot(w_o,obs,axes=(1,0)),act,axes=1)
         bias=jnp.tensordot(b,act,axes=1)

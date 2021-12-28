@@ -27,9 +27,9 @@ class CompassWorld:
     }
 
     def __init__(self,height=8,width=8,seed=0) -> None:
-        self.height=height
-        self.width=width
-        self.env=np.chararray((height,width))
+        self.height=height+2 #Add the length of the boundary
+        self.width=width+2 
+        self.env=np.chararray((self.height,self.width))
         self.env[:]='w'
         self.env[0,:]='o'
         self.env[:,self.width-1]='y'
@@ -74,6 +74,7 @@ class CompassWorld:
         """
         return self.agent_pos,self.agent_orientation  
 
+
     def observe(self):
         """
             Return the observed color as 
@@ -90,7 +91,6 @@ class CompassWorld:
     def wall_ahead(self):
         """Return the color of the wall in front of the agent
         """
-
         if self.agent_orientation==0:
             color=str(self.env[0,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==1:
@@ -99,10 +99,7 @@ class CompassWorld:
             color=str(self.env[self.height-1,self.agent_pos[1]],'utf-8')
         elif self.agent_orientation==3:
             color=str(self.env[self.agent_pos[0],0],'utf-8')
-        color_idx=CompassWorld.color_codes[color]
-        wall_vec=np.zeros(len(CompassWorld.color_codes)-1)
-        wall_vec[color_idx-1]=1
-        return wall_vec
+        return color
 
 
     @staticmethod
