@@ -1,4 +1,4 @@
-# General-Value-Function-Networks-Python
+# General Value Function Networks Python
 
 Implements General Value Function Networks proposed in https://arxiv.org/abs/1807.06763 using JAX
 
