@@ -7,34 +7,13 @@ import jax.numpy as jnp
 import time
 import numpy as np
 
-from src.models.rnn import MultiplicativeRNN,rnn_transform
-from src.agent import GVF, Horde,initialize_gvf
+from src.models.rnn import MultiplicativeRNN, rnn_transform
+from src.agent import Horde,initialize_gvf
+from src.utils.utils import tree_dot,tree_sum
 from src.envs import CompassWorld
-from jax import random,jit, value_and_grad,lax
-from functools import partial
+from jax import random,jit, value_and_grad
+from .gvfs import TerminatingHorizonGVF
 
-
-class TerminatingHorizonGVF(GVF):
-    def __init__(self,color,gamma) -> None:
-        super().__init__()
-        self.color=color
-        self.gamma=gamma
-        self.f_vec=CompassWorld.vectorize_action('f')
-        self.w_vec=CompassWorld.vectorize_color('w')
-        self.color_vec=CompassWorld.vectorize_color(self.color)
-        def check_vec_equal(vec1,vec2):
-            return (vec1==vec2).sum()==vec1.shape[0]
-        self.check_vec_equal=check_vec_equal
-    
-    def __call__(self, obs, act, prev_state):
-        cumulant=lax.cond(self.check_vec_equal(obs,self.color_vec),lambda x: jnp.array(1.0),lambda x: jnp.array(0.0),None)
-        gamma=lax.cond(self.check_vec_equal(obs,self.w_vec),lambda x: jnp.array(x),lambda x: jnp.array(0.0),self.gamma)
-        policy=lax.cond(self.check_vec_equal(act,self.f_vec),lambda x: jnp.array(1.0),lambda x: jnp.array(0.0),None)
-        return policy,cumulant,gamma,None
-
-    @staticmethod
-    def initial_state():
-        return None
 
 
 class CompassWorldPredictor:
@@ -58,6 +37,7 @@ class CompassWorldPredictor:
         self.obs_size=obs_size
         self.act_size=act_size
         self.truncation=truncation
+        self.rnn_activation_type=rnn_activation_type
         #Intialize the RNN layer
         def rnn_forward(inputs,last_state):
             rnn=MultiplicativeRNN(self.obs_size,self.act_size,self.rnn_hidden_size,
@@ -66,12 +46,12 @@ class CompassWorldPredictor:
             return out, state
         self.last_state=MultiplicativeRNN.initial_state(self.obs_size,self.act_size,self.rnn_hidden_size,
                                                         self.truncation)
-        rnn_forward_trf=hk.without_apply_rng(hk.transform(rnn_forward)) #Does not use custom jvp autodiff rules
+        self.rnn_forward_trf=hk.without_apply_rng(hk.transform(rnn_forward)) #Does not use custom jvp autodiff rules
         self.sample_o=jax.random.normal(self.key,[self.obs_size])
         self.sample_a=jax.random.normal(self.key,[self.act_size])
         
-        self.rnn_params=rnn_forward_trf.init(self.key,(self.sample_o,self.sample_a),self.last_state)
-        self.rnn_forward=jit(rnn_forward_trf.apply)
+        self.rnn_params=self.rnn_forward_trf.init(self.key,(self.sample_o,self.sample_a),self.last_state)
+        self.rnn_forward=jit(self.rnn_forward_trf.apply)
         #Initilize the output layers
         def output_forward(hidden_state):
             output_layer=hk.Sequential([hk.Linear(self.hidden_size),jax.nn.relu,
@@ -187,6 +167,70 @@ class GVFNTDPredictor(CompassWorldPredictor):
             
         self.update=update
 
+class GVFNTDCPredictor(CompassWorldPredictor):
+    #TDC Agent
+    def __init__(self, obs_size, act_size, truncation, rnn_hidden_size=40, hidden_size=32, lr=0.001,optimizer='sgd', beta=0.001,seed=0) -> None:
+        super().__init__(obs_size, act_size, truncation, rnn_activation_type='sigmoid',rnn_hidden_size=rnn_hidden_size, 
+                        hidden_size=hidden_size, lr=lr, optimizer=optimizer,seed=seed)
+        
+        gammas=[1-2.0**k for k in range(-7,1)]
+        self.gvfs=[initialize_gvf(TerminatingHorizonGVF,self.key,self.sample_o,self.sample_a,color,gamma,)  for color in self.colors for gamma in gammas]
+        self.horde=Horde(self.gvfs)
+
+        #We use the custom gradient version of transform here
+        self.rnn_forward_trf=rnn_transform(MultiplicativeRNN,self.obs_size,self.act_size,self.rnn_hidden_size,
+                                activation=self.rnn_activation_type)
+        self.sample_o=jax.random.normal(self.key,[self.obs_size])
+        self.sample_a=jax.random.normal(self.key,[self.act_size])
+        
+        self.rnn_params=self.rnn_forward_trf.init(self.key,(self.sample_o,self.sample_a),self.last_state)
+        self.rnn_forward=jit(self.rnn_forward_trf.apply)
+        #TDC weights
+        self.key,subkey=random.split(self.key)
+        self.w_params=self.rnn_forward_trf.init(subkey,(self.sample_o,self.sample_a),self.last_state)
+        self.rnn_sensitivity_fn=jit(jax.jacrev(self.rnn_forward))
+        self.rnn_hvp_fun=MultiplicativeRNN.hvp
+        #TDC weights optimizer
+        if optimizer=='sgd':
+            self.optimizer_w=optax.sgd(lr)
+        elif optimizer=='adam':
+            self.optimizer_w=optax.adam(lr)
+        self.optimizer_w_state=self.optimizer_w.init(self.w_params)
+
+        @jit
+        def update(rnn_params,w_params,output_params,last_state,optimizer_rnn_state,optimizer_w_state,optimizer_output_state,inputs):
+            h_t,s_t=self.rnn_forward(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)
+            h_tplus1,s_tplus1=self.rnn_forward(rnn_params,(inputs['o_t+1'],inputs['a_t']),s_t)
+            pred_t=self.output_forward(output_params,h_t)
+            pred_tplus1=self.output_forward(output_params,h_tplus1)
+            #Calculate GVFN TDC gradients
+            phi_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)[0] #Jacobian of s_t
+            _phi_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t+1'],inputs['a_t']),s_t)[0] #Jacobian of s_t+1
+            delta_t=inputs['c_t+1']+inputs['gamma_t+1']*h_tplus1-h_t
+            rho_t=jnp.exp(jnp.log(inputs['pi_otat'])-jnp.log(inputs['mu_otat']))
+            v_t=MultiplicativeRNN.hvp(self.rnn_forward,rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state,w_params)
+            _delta_t=tree_dot(phi_t,w_params)
+            Ψ_t=jax.tree_map(lambda x:jnp.tensordot(rho_t*delta_t-_delta_t,x,axes=1),v_t)
+            grad_rnn_term1=jax.tree_map(lambda x: -jnp.tensordot(rho_t*delta_t,x,axes=1), phi_t)
+            grad_rnn_term2=jax.tree_map(lambda x: jnp.tensordot(rho_t*inputs['gamma_t+1']*_delta_t,x,axes=1), _phi_t)
+            grad_rnn_params=tree_sum(tree_sum(grad_rnn_term1,grad_rnn_term2),Ψ_t)
+            #Calculate the w_params gradients
+            grad_w_params=jax.tree_map(lambda x: -jnp.tensordot(rho_t*(delta_t-_delta_t),x,axes=1), phi_t)
+            #Calculate output layer gradients
+            target_t=inputs['c_t+1_output']+inputs['gamma_t+1_output']*pred_tplus1
+            rho_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
+            grad_fn=value_and_grad(self.loss_fn)
+            loss,grad_output_params=grad_fn(output_params,h_t,target_t,rho_t_target)
+            #Apply the calculated updates
+            updates, optimizer_rnn_state = self.optimizer_rnn.update(grad_rnn_params, optimizer_rnn_state)
+            rnn_params=optax.apply_updates(rnn_params,updates) #RNN
+            updates, optimizer_w_state= self.optimizer_w.update(grad_w_params, optimizer_w_state)
+            w_params=optax.apply_updates(w_params,updates) #w params
+            updates, optimizer_output_state = self.optimizer_output.update(grad_output_params, optimizer_output_state)
+            output_params=optax.apply_updates(output_params,updates) #Output layer
+            return rnn_params,w_params,output_params,optimizer_rnn_state,optimizer_w_state,optimizer_output_state,loss,pred_t,s_t
+            
+        self.update=update
 
 
     def step(self,o_t,a_tminus1,o_tplus1,a_t, mu_otat):
@@ -210,8 +254,9 @@ class GVFNTDPredictor(CompassWorldPredictor):
 
         inputs['pi_otat_output'],inputs['c_t+1_output'],inputs['gamma_t+1_output']=self.output_horde.step(inputs['o_t+1'],inputs['a_t'])
 
-        self.rnn_params,self.output_params,self.optimizer_rnn_state,self.optimizer_output_state,loss,pred,self.last_state=self.update(self.rnn_params,self.output_params,self.last_state,
-                                                        self.optimizer_rnn_state,self.optimizer_output_state,inputs)
+        self.rnn_params,self.w_params,self.output_params,self.optimizer_rnn_state,self.optimizer_w_state,self.optimizer_output_state,loss,pred,self.last_state=self.update(self.rnn_params,self.w_params,self.output_params,
+                                                        self.last_state,
+                                                        self.optimizer_rnn_state,self.optimizer_w_state,self.optimizer_output_state,inputs)
         return loss,pred
         
 

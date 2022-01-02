@@ -28,10 +28,16 @@ def run_compass_world(args):
         predictor=CWPRNNPredictor(obs_size,act_size,args.truncation,
                                                 rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,
                                                 lr=args.lr,optimizer=args.optimizer,seed=args.seed)
-    elif args.agent_type=='gvfn':
+    elif args.agent_type=='gvfn_td':
         predictor=GVFNTDPredictor(obs_size,act_size,args.truncation,
                                     rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,
                                                 lr=args.lr,optimizer=args.optimizer,seed=args.seed)
+    elif args.agent_type=='gvfn_tdc':
+        predictor=GVFNTDCPredictor(obs_size,act_size,args.truncation,
+                                    rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,
+                                                lr=args.lr,optimizer=args.optimizer,beta=args.tdc_beta,seed=args.seed)
+    else:
+        raise NotImplementedError("Invalid agent type:%s"%args.agent_type)
     losses,rmsves,accs=[],[],[]
     mean_accs,mean_rmsves,steps=[],[],[]
 
@@ -77,6 +83,7 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--truncation',type=int,default=1)
     parser.add_argument('--lr',type=float,default=0.01)
+    parser.add_argument('--tdc_beta',type=float,default=0.01)
     parser.add_argument('--rnn_hidden_size',type=int,default=40)
     parser.add_argument('--env_size',type=int,default=6)
     parser.add_argument('--hidden_size',type=int,default=32)

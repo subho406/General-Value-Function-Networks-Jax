@@ -6,14 +6,26 @@ import jax.numpy as jnp
 
 from functools import partial
 from jax import jit,custom_jvp
+from src.utils.utils import tree_dot
 from haiku import Transformed
 from haiku._src.recurrent import add_batch
 from typing import Optional, Tuple, Any, NamedTuple
-
+from jax import lax
 
 class BasePRNN(hk.RNNCore): 
 
     @staticmethod
+    @partial(jit, static_argnums=(0,)) 
+    def hvp(rnn_forward,rnn_params,inputs,last_state,vector):
+        def jvp(rnn_params,inputs,last_state,vector):
+            jacobians=jax.jacrev(rnn_forward)(rnn_params,inputs,last_state)[0]
+            jvp=tree_dot(jacobians,vector)
+            return jvp
+        hvp_fn=jax.jacrev(jvp)
+        return hvp_fn(rnn_params,inputs,last_state,vector)
+
+    @staticmethod
+    @partial(jit, static_argnums=(0,)) 
     def sensitivity(rnn_forward,rnn_params,rnn_state):
         """Returns the jacobian of the current hidden state with respect to the RNN params 
             until the length of the trajectory. 
@@ -27,7 +39,6 @@ class BasePRNN(hk.RNNCore):
         Returns:
             jax.numpy.array: Tensor containing the sensitivities as a Jacobian matrix
         """
-        
         hidden_state,trajectory=rnn_state
         last_hidden_states=trajectory.last_hidden_states
         observations=trajectory.observations
@@ -44,7 +55,6 @@ class BasePRNN(hk.RNNCore):
         del_h_t_theta=del_h_tminus1_theta
 
         def sensitivity_calc(del_h_tminus1_theta,trajectory):
-            
             o_t,a_tminus1,h_tminus1=trajectory
             del_f_theta=rnn_jac_theta(rnn_params,o_t,a_tminus1,h_tminus1)
             del_f_h_tminus1=rnn_jac_hidden(rnn_params,o_t,a_tminus1,h_tminus1)
@@ -53,9 +63,13 @@ class BasePRNN(hk.RNNCore):
             # del_h_t_theta+=del_f_theta
             del_h_t_theta=jax.tree_multimap(lambda x, y: x+y, del_h_t_theta, del_f_theta)
             return del_h_t_theta,None
-        
-        del_h_t_theta,_=jax.lax.scan(sensitivity_calc,del_h_tminus1_theta,(observations[1:],last_actions[1:],
-                                                                               last_hidden_states[1:]))
+
+        def scan_all_prev():
+            scan_all_prev,_=jax.lax.scan(sensitivity_calc,del_h_tminus1_theta,(observations[1:],last_actions[1:],
+                                                                                last_hidden_states[1:]))
+            return scan_all_prev
+            
+        del_h_t_theta=lax.cond(observations.shape[0]>1,lambda x: scan_all_prev(),lambda x: del_h_t_theta,None) #Execute the expesive forward prop rule only if truncation is greater than 1                                                                       
         return del_h_t_theta
 
         
@@ -151,6 +165,8 @@ def rnn_transform(rnn_class:BasePRNN,*args,**kwargs):
         return primal_out,(tangent_out,primal_out[1]) #Second parameter currently returns the primal_out (forward propagation)
     transformed_f.defjvp(f_jvp)
     return Transformed(init=transformed.init,apply=transformed_f)
+
+
 
 
    
