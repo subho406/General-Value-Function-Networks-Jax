@@ -32,6 +32,7 @@ def run_compass_world(args):
         predictor=GVFNTDPredictor(obs_size,act_size,args.truncation,
                                     rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,
                                                 lr=args.lr,optimizer=args.optimizer,seed=args.seed)
+        print("hello")
     elif args.agent_type=='gvfn_tdc':
         predictor=GVFNTDCPredictor(obs_size,act_size,args.truncation,
                                     rnn_hidden_size=args.rnn_hidden_size,hidden_size=args.hidden_size,

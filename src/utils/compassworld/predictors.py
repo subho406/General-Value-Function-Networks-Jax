@@ -167,6 +167,31 @@ class GVFNTDPredictor(CompassWorldPredictor):
             
         self.update=update
 
+    def step(self,o_t,a_tminus1,o_tplus1,a_t, mu_otat):
+        """
+
+        Args:
+            o_t ([type]): Observation at timestep t
+            a_tminus1 ([type]): Action at timestep t-1
+            o_tplus1 ([type]): Observation at timestep t+1
+            a_t ([type]): Action at timestep t
+            target_t ([type]): Target at timestep t
+        """
+        inputs={}
+        inputs['o_t']=jnp.array(CompassWorld.vectorize_color(o_t))
+        inputs['a_t-1']=jnp.array(CompassWorld.vectorize_action(a_tminus1))
+        inputs['o_t+1']=jnp.array(CompassWorld.vectorize_color(o_tplus1))
+        inputs['a_t']=jnp.array(CompassWorld.vectorize_action(a_t))
+        inputs['mu_otat']=jnp.array(mu_otat)
+        #Calculate the GVF cumulants, gammas and policies
+        inputs['pi_otat'],inputs['c_t+1'],inputs['gamma_t+1']=self.horde.step(inputs['o_t+1'],inputs['a_t'])
+
+        inputs['pi_otat_output'],inputs['c_t+1_output'],inputs['gamma_t+1_output']=self.output_horde.step(inputs['o_t+1'],inputs['a_t'])
+
+        self.rnn_params,self.output_params,self.optimizer_rnn_state,self.optimizer_output_state,loss,pred,self.last_state=self.update(self.rnn_params,self.output_params,
+                                                        self.last_state,self.optimizer_rnn_state,self.optimizer_output_state,inputs)
+        return loss,pred
+
 class GVFNTDCPredictor(CompassWorldPredictor):
     #TDC Agent
     def __init__(self, obs_size, act_size, truncation, rnn_hidden_size=40, hidden_size=32, lr=0.001,optimizer='sgd', beta=0.001,seed=0) -> None:
