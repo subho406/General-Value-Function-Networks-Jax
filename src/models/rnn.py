@@ -25,7 +25,7 @@ class BasePRNN(hk.RNNCore):
         return hvp_fn(rnn_params,inputs,last_state,vector)
 
     @staticmethod
-    @partial(jit, static_argnums=(0,)) 
+    @partial(jit, static_argnums=(0,)) #Used with custom autodiff defined in our custom transform function below
     def jvp_through_time(rnn_forward,rnn_params,rnn_state,tangents):
         """Returns the JVP of the current hidden state with respect to the RNN params 
             until the length of the trajectory. 
@@ -66,7 +66,7 @@ class BasePRNN(hk.RNNCore):
             return scan_all_prev[0]
         return scan_all_prev()
 
-
+    # Deprecated
     @staticmethod
     @partial(jit, static_argnums=(0,)) 
     def sensitivity(rnn_forward,rnn_params,rnn_state):
@@ -115,7 +115,6 @@ class BasePRNN(hk.RNNCore):
         del_h_t_theta=lax.cond(observations.shape[0]>1,lambda x: scan_all_prev(),lambda x: del_h_t_theta,None) #Execute the expesive forward prop rule only if truncation is greater than 1                                                                       
         return del_h_t_theta
 
-        
 
 
 class TrajectoryState(NamedTuple):

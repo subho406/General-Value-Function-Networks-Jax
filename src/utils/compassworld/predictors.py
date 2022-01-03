@@ -4,6 +4,7 @@ import haiku as hk
 import optax
 import jax.numpy as jnp
 import numpy as np
+from src.agent.gvfn import GVFN
 
 from src.models.rnn import MultiplicativeRNN, rnn_transform
 from src.agent import Horde,initialize_gvf
@@ -36,15 +37,6 @@ class CompassWorldPredictor:
         self.act_size=act_size
         self.truncation=truncation
         self.rnn_activation_type=rnn_activation_type
-        #Intialize the RNN layer
-        self.rnn_forward_trf=rnn_transform(MultiplicativeRNN,self.obs_size,self.act_size,self.rnn_hidden_size,
-                                activation=self.rnn_activation_type)
-        self.sample_o=jax.random.normal(self.key,[self.obs_size])
-        self.sample_a=jax.random.normal(self.key,[self.act_size])
-        self.last_state=MultiplicativeRNN.initial_state(self.obs_size,self.act_size,self.rnn_hidden_size,
-                                                         self.truncation)
-        self.rnn_params=self.rnn_forward_trf.init(self.key,(self.sample_o,self.sample_a),self.last_state)
-        self.rnn_forward=jit(self.rnn_forward_trf.apply)
         def output_forward(hidden_state):
             output_layer=hk.Sequential([hk.Linear(self.hidden_size),jax.nn.relu,
                             hk.Linear(5)])
@@ -60,16 +52,10 @@ class CompassWorldPredictor:
         self.loss_fn=jit(loss_fn)
         #Initialize the optimizers
         if optimizer=='sgd':
-            print("Using optimizer SGD.")
-            self.optimizer_rnn=optax.sgd(lr)
             self.optimizer_output=optax.sgd(lr)
         elif optimizer=='adam':
-            print("Using optimizer ADAM.")
-            self.optimizer_rnn=optax.adam(lr)
             self.optimizer_output=optax.adam(lr)
-        self.optimizer_rnn_state=self.optimizer_rnn.init(self.rnn_params)
         self.optimizer_output_state=self.optimizer_output.init(self.output_params)
-        self.rnn_sensitivity_fn=jit(jax.jacrev(self.rnn_forward))
         #Initialize the output GVFS
         self.output_gvfs=[initialize_gvf(TerminatingHorizonGVF,self.key,self.sample_o,self.sample_a,color,1.0,)  for color in self.colors]
         self.output_horde=Horde(self.output_gvfs)
@@ -133,7 +119,8 @@ class GVFNTDPredictor(CompassWorldPredictor):
         
         gammas=[1-2.0**k for k in range(-7,1)]
         self.gvfs=[initialize_gvf(TerminatingHorizonGVF,self.key,self.sample_o,self.sample_a,color,gamma,)  for color in self.colors for gamma in gammas]
-        self.horde=Horde(self.gvfs)
+        self.gvfn_network=GVFN()
+
         @jit
         def update(rnn_params,output_params,last_state,optimizer_rnn_state,optimizer_output_state,inputs):
             h_t,s_t=self.rnn_forward(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)
