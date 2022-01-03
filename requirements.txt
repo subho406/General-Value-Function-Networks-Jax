@@ -1,0 +1,6 @@
+dm-haiku
+jax
+numpy 
+pandas
+wandb
+optax
