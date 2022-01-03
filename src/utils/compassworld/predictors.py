@@ -1,10 +1,8 @@
 import jax 
 import abc
 import haiku as hk
-from jax._src.random import gamma
 import optax
 import jax.numpy as jnp
-import time
 import numpy as np
 
 from src.models.rnn import MultiplicativeRNN, rnn_transform
@@ -39,20 +37,14 @@ class CompassWorldPredictor:
         self.truncation=truncation
         self.rnn_activation_type=rnn_activation_type
         #Intialize the RNN layer
-        def rnn_forward(inputs,last_state):
-            rnn=MultiplicativeRNN(self.obs_size,self.act_size,self.rnn_hidden_size,
-                                activation=rnn_activation_type)
-            out,state=rnn(inputs,last_state)
-            return out, state
-        self.last_state=MultiplicativeRNN.initial_state(self.obs_size,self.act_size,self.rnn_hidden_size,
-                                                        self.truncation)
-        self.rnn_forward_trf=hk.without_apply_rng(hk.transform(rnn_forward)) #Does not use custom jvp autodiff rules
+        self.rnn_forward_trf=rnn_transform(MultiplicativeRNN,self.obs_size,self.act_size,self.rnn_hidden_size,
+                                activation=self.rnn_activation_type)
         self.sample_o=jax.random.normal(self.key,[self.obs_size])
         self.sample_a=jax.random.normal(self.key,[self.act_size])
-        
+        self.last_state=MultiplicativeRNN.initial_state(self.obs_size,self.act_size,self.rnn_hidden_size,
+                                                         self.truncation)
         self.rnn_params=self.rnn_forward_trf.init(self.key,(self.sample_o,self.sample_a),self.last_state)
         self.rnn_forward=jit(self.rnn_forward_trf.apply)
-        #Initilize the output layers
         def output_forward(hidden_state):
             output_layer=hk.Sequential([hk.Linear(self.hidden_size),jax.nn.relu,
                             hk.Linear(5)])
@@ -62,9 +54,9 @@ class CompassWorldPredictor:
         sample_h=jax.random.normal(self.key,[self.rnn_hidden_size])
         self.output_params=output_forward_trf.init(self.key,sample_h)
         self.output_forward=jit(output_forward_trf.apply)
-        def loss_fn(params,hidden_state,target,rho_t_target):
+        def loss_fn(params,hidden_state,target,ρ_t_target):
             pred=self.output_forward(params,hidden_state)
-            return (rho_t_target*((pred-target)**2)).sum()*(1/(2*rho_t_target.shape[0]))
+            return (ρ_t_target*((pred-target)**2)).sum()*(1/(2*ρ_t_target.shape[0]))
         self.loss_fn=jit(loss_fn)
         #Initialize the optimizers
         if optimizer=='sgd':
@@ -77,7 +69,7 @@ class CompassWorldPredictor:
             self.optimizer_output=optax.adam(lr)
         self.optimizer_rnn_state=self.optimizer_rnn.init(self.rnn_params)
         self.optimizer_output_state=self.optimizer_output.init(self.output_params)
-        self.rnn_sensitivity_fn=MultiplicativeRNN.sensitivity #Use legacy sensitivity calculation, we will replace this when we have a more efficient P-RNN autodiff
+        self.rnn_sensitivity_fn=jit(jax.jacrev(self.rnn_forward))
         #Initialize the output GVFS
         self.output_gvfs=[initialize_gvf(TerminatingHorizonGVF,self.key,self.sample_o,self.sample_a,color,1.0,)  for color in self.colors]
         self.output_horde=Horde(self.output_gvfs)
@@ -101,15 +93,15 @@ class CWPRNNPredictor(CompassWorldPredictor):
             #Pass through RNN and calculate sensitivities
             h_t,s_t=self.rnn_forward(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)
             h_tplus1,s_tplus1=self.rnn_forward(rnn_params,(inputs['o_t+1'],inputs['a_t']),s_t)
-            rnn_sensitivities=self.rnn_sensitivity_fn(self.rnn_forward,rnn_params,s_t)
+            rnn_sensitivities,_=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)
             pred_t=self.output_forward(output_params,h_t)
             pred_tplus1=self.output_forward(output_params,h_tplus1)
             target=inputs['c_t+1_output']+inputs['gamma_t+1_output']*pred_tplus1
-            rho_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
+            ρ_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
             grad_fn=value_and_grad(self.loss_fn)
             #Calculate the gradients for the output layer and its sensitivites
-            loss,grad_output_params=grad_fn(output_params,h_t,target,rho_t_target)
-            output_sensitivities=jax.jacrev(self.loss_fn,argnums=1)(output_params,h_t,target,rho_t_target) #Legacy: we replace with end-to-end loss_fn later.
+            loss,grad_output_params=grad_fn(output_params,h_t,target,ρ_t_target)
+            output_sensitivities=jax.jacrev(self.loss_fn,argnums=1)(output_params,h_t,target,ρ_t_target) #Legacy: we replace with end-to-end loss_fn later.
             #Calculate gradients by backpropagating sensitivities of output layer (chain rule)
             grad_rnn_params=jax.tree_multimap(lambda x: jnp.tensordot(output_sensitivities,x,axes=1), rnn_sensitivities) 
             #Apply the calculated updates
@@ -149,15 +141,15 @@ class GVFNTDPredictor(CompassWorldPredictor):
             pred_t=self.output_forward(output_params,h_t)
             pred_tplus1=self.output_forward(output_params,h_tplus1)
             #Calculate GVFN TD gradients
-            phi_t=self.rnn_sensitivity_fn(self.rnn_forward,rnn_params,s_t) #Legacy
-            delta_t=inputs['c_t+1']+inputs['gamma_t+1']*h_tplus1-h_t
-            rho_t=jnp.exp(jnp.log(inputs['pi_otat'])-jnp.log(inputs['mu_otat']))
-            grad_rnn_params=jax.tree_map(lambda x: -jnp.tensordot(rho_t*delta_t,x,axes=1), phi_t)
+            𝝫_t,_=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)
+            δ_t=inputs['c_t+1']+inputs['gamma_t+1']*h_tplus1-h_t
+            ρ_t=jnp.exp(jnp.log(inputs['pi_otat'])-jnp.log(inputs['mu_otat']))
+            grad_rnn_params=jax.tree_map(lambda x: -jnp.tensordot(ρ_t*δ_t,x,axes=1), 𝝫_t)
             #Calculate output layer gradients
             target_t=inputs['c_t+1_output']+inputs['gamma_t+1_output']*pred_tplus1
-            rho_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
+            ρ_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
             grad_fn=value_and_grad(self.loss_fn)
-            loss,grad_output_params=grad_fn(output_params,h_t,target_t,rho_t_target)
+            loss,grad_output_params=grad_fn(output_params,h_t,target_t,ρ_t_target)
             #Apply the calculated updates
             updates, optimizer_rnn_state = self.optimizer_rnn.update(grad_rnn_params, optimizer_rnn_state)
             rnn_params=optax.apply_updates(rnn_params,updates)
@@ -229,23 +221,24 @@ class GVFNTDCPredictor(CompassWorldPredictor):
             pred_t=self.output_forward(output_params,h_t)
             pred_tplus1=self.output_forward(output_params,h_tplus1)
             #Calculate GVFN TDC gradients
-            phi_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)[0] #Jacobian of s_t
-            _phi_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t+1'],inputs['a_t']),s_t)[0] #Jacobian of s_t+1
-            delta_t=inputs['c_t+1']+inputs['gamma_t+1']*h_tplus1-h_t
-            rho_t=jnp.exp(jnp.log(inputs['pi_otat'])-jnp.log(inputs['mu_otat']))
+            𝝫_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state)[0] #Jacobian of s_t
+            _𝝫_t=self.rnn_sensitivity_fn(rnn_params,(inputs['o_t+1'],inputs['a_t']),s_t)[0] #Jacobian of s_t+1
+            δ_t=inputs['c_t+1']+inputs['gamma_t+1']*h_tplus1-h_t
+            ρ_t=jnp.exp(jnp.log(inputs['pi_otat'])-jnp.log(inputs['mu_otat']))
             v_t=MultiplicativeRNN.hvp(self.rnn_forward,rnn_params,(inputs['o_t'],inputs['a_t-1']),last_state,w_params)
-            _delta_t=tree_dot(phi_t,w_params)
-            Ψ_t=jax.tree_map(lambda x:jnp.tensordot(rho_t*delta_t-_delta_t,x,axes=1),v_t)
-            grad_rnn_term1=jax.tree_map(lambda x: -jnp.tensordot(rho_t*delta_t,x,axes=1), phi_t)
-            grad_rnn_term2=jax.tree_map(lambda x: jnp.tensordot(rho_t*inputs['gamma_t+1']*_delta_t,x,axes=1), _phi_t)
+            _δ_t=tree_dot(𝝫_t,w_params)
+            Ψ_t=jax.tree_map(lambda x:jnp.tensordot(ρ_t*δ_t-_δ_t,x,axes=1),v_t)
+            grad_rnn_term1=jax.tree_map(lambda x: -jnp.tensordot(ρ_t*δ_t,x,axes=1), 𝝫_t)
+            grad_rnn_term2=jax.tree_map(lambda x: jnp.tensordot(ρ_t*inputs['gamma_t+1']*_δ_t,x,axes=1), _𝝫_t)
             grad_rnn_params=tree_sum(tree_sum(grad_rnn_term1,grad_rnn_term2),Ψ_t)
             #Calculate the w_params gradients
-            grad_w_params=jax.tree_map(lambda x: -jnp.tensordot(rho_t*(delta_t-_delta_t),x,axes=1), phi_t)
+            
+            grad_w_params=jax.tree_map(lambda x: -jnp.tensordot(ρ_t*(δ_t-_δ_t),x,axes=1), 𝝫_t)
             #Calculate output layer gradients
             target_t=inputs['c_t+1_output']+inputs['gamma_t+1_output']*pred_tplus1
-            rho_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
+            ρ_t_target=jnp.exp(jnp.log(inputs['pi_otat_output'])-jnp.log(inputs['mu_otat']))
             grad_fn=value_and_grad(self.loss_fn)
-            loss,grad_output_params=grad_fn(output_params,h_t,target_t,rho_t_target)
+            loss,grad_output_params=grad_fn(output_params,h_t,target_t,ρ_t_target)
             #Apply the calculated updates
             updates, optimizer_rnn_state = self.optimizer_rnn.update(grad_rnn_params, optimizer_rnn_state)
             rnn_params=optax.apply_updates(rnn_params,updates) #RNN

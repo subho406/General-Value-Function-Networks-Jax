@@ -10,7 +10,7 @@ from src.utils.utils import tree_dot
 from haiku import Transformed
 from haiku._src.recurrent import add_batch
 from typing import Optional, Tuple, Any, NamedTuple
-from jax import lax
+from jax import lax,jvp
 
 class BasePRNN(hk.RNNCore): 
 
@@ -23,6 +23,49 @@ class BasePRNN(hk.RNNCore):
             return jvp
         hvp_fn=jax.jacrev(jvp)
         return hvp_fn(rnn_params,inputs,last_state,vector)
+
+    @staticmethod
+    @partial(jit, static_argnums=(0,)) 
+    def jvp_through_time(rnn_forward,rnn_params,rnn_state,tangents):
+        """Returns the JVP of the current hidden state with respect to the RNN params 
+            until the length of the trajectory. 
+
+            In future this will be replaced with with JAX grad primitives
+        Args:
+            rnn_forward_pure ([type]): Pure haiku RNN transformed function 
+            rnn_params ([type]): RNN parameters for the transformed function
+            rnn_trajectory (tuple(jnp.array,jnp.array)): Tuple of (inputs,last hidden_state)
+
+        Returns:
+            jax.numpy.array: Tensor containing the sensitivities as a Jacobian matrix
+        """
+        hidden_state,trajectory=rnn_state
+        last_hidden_states=trajectory.last_hidden_states
+        observations=trajectory.observations
+        last_actions=trajectory.last_actions
+        rnn_params_t,inputs_t,last_state_t=tangents
+        rnn_forward_out_tangents=(rnn_params_t,inputs_t,last_state_t[0])
+        def rnn_forward_out(params,inputs,last_hidden_state):
+            out,_=rnn_forward(params,inputs,(last_hidden_state,None))
+            return out
+        rnn_jac_hidden=jax.jacrev(rnn_forward_out,argnums=2)
+        _,jvp_h_tminus1_theta=jvp(rnn_forward_out,(rnn_params,(observations[0],last_actions[0]),last_hidden_states[0]),
+                                          rnn_forward_out_tangents) #Ignore the output for now
+        def sensitivity_calc(carry_state,trajectory):
+            jvp_h_tminus1_theta,rnn_forward_out_tangents=carry_state
+            o_t,a_tminus1,h_tminus1=trajectory
+            _,jvp_f_theta=jvp(rnn_forward_out,(rnn_params,(o_t,a_tminus1),h_tminus1),
+                                          rnn_forward_out_tangents)
+            del_f_h_tminus1=rnn_jac_hidden(rnn_params,(o_t,a_tminus1),h_tminus1)
+            jvp_h_t_theta=jnp.tensordot(del_f_h_tminus1,jvp_h_tminus1_theta,axes=1)+jvp_f_theta
+            return (jvp_h_t_theta,rnn_forward_out_tangents),None
+
+        def scan_all_prev():
+            scan_all_prev,_=jax.lax.scan(sensitivity_calc,(jvp_h_tminus1_theta,rnn_forward_out_tangents),(observations[1:],last_actions[1:],
+                                                                                last_hidden_states[1:]))
+            return scan_all_prev[0]
+        return scan_all_prev()
+
 
     @staticmethod
     @partial(jit, static_argnums=(0,)) 
@@ -68,7 +111,7 @@ class BasePRNN(hk.RNNCore):
             scan_all_prev,_=jax.lax.scan(sensitivity_calc,del_h_tminus1_theta,(observations[1:],last_actions[1:],
                                                                                 last_hidden_states[1:]))
             return scan_all_prev
-            
+
         del_h_t_theta=lax.cond(observations.shape[0]>1,lambda x: scan_all_prev(),lambda x: del_h_t_theta,None) #Execute the expesive forward prop rule only if truncation is greater than 1                                                                       
         return del_h_t_theta
 
@@ -157,12 +200,9 @@ def rnn_transform(rnn_class:BasePRNN,*args,**kwargs):
     transformed_f=custom_jvp(transformed.apply)
     def f_jvp(primals, tangents):
         rnn_params,inputs,last_state=primals
-        rnn_params_t,inputs_t,last_state_t=tangents
         primal_out=transformed_f(rnn_params,inputs,last_state)
-        jacobian=rnn_class.sensitivity(forward_fn,rnn_params,primal_out[1])
-        tangent_out=jax.tree_multimap(lambda x, y: jnp.tensordot(x,y,y.ndim), jacobian, rnn_params_t)
-        tangent_out=jnp.stack(jax.tree_util.tree_flatten(tangent_out)[0],axis=0).sum(axis=0)
-        return primal_out,(tangent_out,primal_out[1]) #Second parameter currently returns the primal_out (forward propagation)
+        tangent_out_1=rnn_class.jvp_through_time(forward_fn,rnn_params,primal_out[1],tangents)
+        return primal_out,(tangent_out_1,primal_out[1]) #JVP for last_state is NotImplemented hence returns primal output
     transformed_f.defjvp(f_jvp)
     return Transformed(init=transformed.init,apply=transformed_f)
 

@@ -114,7 +114,7 @@ class CompassWorld:
             np.array : [description]
         """
         color_idx=CompassWorld.color_codes[color]
-        color_vec=np.array([1,0]*len(CompassWorld.color_codes))
+        color_vec=np.array([1,0]*len(CompassWorld.color_codes),dtype=np.float32)
         color_vec[color_idx*2]=0
         color_vec[color_idx*2+1]=1
         return color_vec
