@@ -92,7 +92,7 @@ if __name__=='__main__':
     parser.add_argument('--seed',type=int, default=0)
     parser.add_argument("--wandb", default=False, action="store_true",
                     help="Use wandb for logging.")
-    parser.add_argument('--agent_type',type=str,default='prnn',help='Agent to use for training. Available options: [prnn, gvfn]')
+    parser.add_argument('--agent_type',type=str,default='prnn',help='Agent to use for training. Available options: [prnn, gvfn_td, gvfn_tdc]')
     parser.add_argument('--output_dir',type=str,default=None,help='Dump the output to numpy array')
     parser.add_argument('--optimizer',type=str,default='sgd',help='Optimizer to use. One of [sgd, adam]')
     args=parser.parse_args()
